@@ -110,10 +110,17 @@ class ReleaseHandler(JsonHandler):
             return receipt_payload(existing.receipt)
         proof = Proof.from_payload(plan['proof'])
         grants = {row['recording_id']: Grant.from_row(row) for row in plan['grants']}
+
+        def refresh_plan(current_program_id):
+            latest = self.editorial_get(f'/internal/release-plan/{current_program_id}')
+            return (Proof.from_payload(latest['proof']),
+                    {row['recording_id']: Grant.from_row(row) for row in latest['grants']})
+
         hooks = self.context.hooks
         receipt, created = publish_program(store, request_id, proof, grants,
                                            after_registration=hooks.after_registration,
-                                           after_selection=hooks.after_selection)
+                                           after_selection=hooks.after_selection,
+                                           refresh_plan=refresh_plan)
         if created and hooks.drop_after_commit is not None and hooks.drop_after_commit(receipt):
             raise DropResponse()
         return receipt_payload(receipt)

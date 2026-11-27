@@ -92,29 +92,38 @@ def _choose(db, proof, grants):
     return None
 
 
-def _decide(store, request_id, proof, grants, after_selection):
+def _decide(store, request_id, proof, grants):
     public_id = f'preview-{proof.program_id}'
     with transaction(store.db, immediate=False):
         previous = store.get_by_request(request_id)
-        if previous is None and store.get_publication(public_id) is not None:
+        if previous is not None:
+            # An established first release is fixed: same-request replays only collect it.
+            return previous.receipt, False
+        if store.get_publication(public_id) is not None:
             raise ApiError(409, 'program_already_published')
         choice = _choose(store.db, proof, grants)
-        if after_selection is not None:
-            selected_id = None if choice is None else choice[0].entry.candidate.recording_id
-            after_selection(selected_id)
         if choice is None:
-            if previous is not None:
-                return previous.receipt, False
             store.set_status(request_id, 'no_eligible_source')
             return None, False
         reference, grant = choice
         receipt = make_receipt(request_id, public_id, reference, grant)
         store.establish(Publication(receipt, reference.clip.audio))
-        return receipt, previous is None
+        return receipt, True
+
+
+def _observe_selection(store, request_id, proof, grants, after_selection):
+    with transaction(store.db, immediate=False):
+        previous = store.get_by_request(request_id)
+        if previous is not None:
+            return previous.receipt, False
+        choice = _choose(store.db, proof, grants)
+    selected_id = None if choice is None else choice[0].entry.candidate.recording_id
+    after_selection(selected_id)
+    return None, True
 
 
 def publish_program(store: PublicationStore, request_id, proof: Proof, grants, *,
-                    after_registration=None, after_selection=None):
+                    after_registration=None, after_selection=None, refresh_plan=None):
     with transaction(store.db):
         store.register(request_id, proof.program_id)
         established = store.get_by_request(request_id) is not None
@@ -122,9 +131,21 @@ def publish_program(store: PublicationStore, request_id, proof: Proof, grants, *
         after_registration(request_id)
     for attempt in range(4):
         try:
-            # A WAL read snapshot can only be promoted if another writer has not superseded it.
-            observer = after_selection if attempt == 0 else None
-            receipt, created = _decide(store, request_id, proof, grants, observer)
+            if attempt == 0 and after_selection is not None:
+                receipt, pending = _observe_selection(store, request_id, proof, grants, after_selection)
+                if not pending:
+                    return receipt, False
+                # A withdrawal confirmed while the handoff was paused must govern the first
+                # release, so re-read eligibility after the gate before establishing anything.
+                # If the editorial desk is unreachable the handoff is interrupted: keep the
+                # last known snapshot and let the same request retry later.
+                if refresh_plan is not None:
+                    try:
+                        proof, grants = refresh_plan(proof.program_id)
+                    except ApiError as error:
+                        if error.status != 503:
+                            raise
+            receipt, created = _decide(store, request_id, proof, grants)
         except sqlite3.OperationalError as error:
             if not database_busy(error):
                 raise

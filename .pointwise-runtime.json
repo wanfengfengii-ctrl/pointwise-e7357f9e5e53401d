@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "kind": "api",
+  "setup": [],
+  "start": [
+    "python3",
+    "-B",
+    "-m",
+    "samples.serve_pair",
+    "--host",
+    "${POINTWISE_HOST}",
+    "--port",
+    "${POINTWISE_PORT}"
+  ],
+  "readiness_path": "/health",
+  "verify": [
+    "python3",
+    "-B",
+    "-c",
+    "import subprocess, sys; runs = [subprocess.run([sys.executable, '-B', *args]).returncode for args in (['check_project.py'], ['-m', 'samples.incident'])]; raise SystemExit(int(any(runs)))"
+  ],
+  "demo": [
+    "python3",
+    "-B",
+    "-m",
+    "samples.demo"
+  ]
+}
